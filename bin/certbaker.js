@@ -2,20 +2,30 @@
 
 const commander = require('commander');
 const chalk = require('chalk');
-const path = require('path');
+const { join, resolve } = require('path');
 const util = require('util');
 const fs = require('fs');
 const bakeCommand = require('../lib/commands/bake');
 const listCommand = require('../lib/commands/list');
 const pkg = require('../package.json');
 const OpenSSL = require('../lib/OpenSSL');
-const { APP_DIR, CERT_DIR } = require('../lib/constants');
+const { APP_DIR } = require('../lib/constants');
 
 const stat = util.promisify(fs.stat);
 const mkdir = util.promisify(fs.mkdir);
 
 const { log } = console;
-
+const generateRootCA = async (cmd, options) => {
+  const dir = cmd ? cmd : APP_DIR;
+  try {
+    await OpenSSL.generateRootCA(dir, options)
+    return console.log(`Initialized rootCA @${dir}`);
+  } catch (error) {
+    if (error.message !== 'CB_CERTEXISTS') {
+      log(error);
+    }
+  }
+}
 commander
   .version(pkg.version)
   .description(pkg.description);
@@ -25,7 +35,11 @@ commander
   .usage('<common_name> [options]')
   .description('Bake a new certificate using the given common name.')
   .alias('b')
-  .option('-f, --force', 'Force the creation of the certificate, even if it already exists.')
+  .option('-d, --directory [directory]', 'rootCA directory')
+  .option('-c, --country [country]', 'Subject country')
+  .option('-s, --state [state]', 'Subject state')
+  .option('-o, --organization [organization]', 'Subject organization')
+  .option('-f, --force [force]', 'Force the creation of the certificate, even if it already exists.')
   .action(bakeCommand)
   .on('--help', () => {
     log('');
@@ -42,35 +56,61 @@ commander
   .description('List the generated certificates.')
   .action(listCommand);
 
-OpenSSL.getVersion().then((openSSLVersion) => {
-  log(`${chalk.bold('Info:')} Working with ${openSSLVersion}`);
+commander
+  .command('init')
+  .description('Generate a new root certificate and key.')
+  .alias('i')
+  .option('-c, --country [country]', 'Subject country')
+  .option('-s, --state [state]', 'Subject state')
+  .option('-o, --organization [organization]', 'Subject organization')
+  .option('-f, --force [force]', 'Force the creation of the certificate, even if it already exists.')
+  .action(generateRootCA);
 
-  // Initialize the application
-  return stat(APP_DIR).catch((err) => {
-    if (err.code === 'ENOENT') {
-      // Create a new directory for the app in the users home directory.
-      return mkdir(APP_DIR, 0o777).then(() => mkdir(CERT_DIR, 0o777));
+(async () => {
+  try {
+
+    let directory;
+    // Initialize the application
+    try {
+      let i = process.argv.indexOf('-d');
+      if (i === -1) i = process.argv.indexOf('--directory');
+      directory = i !== -1 ? join(APP_DIR, process.argv[i + 1]) : APP_DIR;
+      await stat(directory)
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        // Create a new directory for the app in the users home directory.
+        await mkdir(APP_DIR, 0o777);
+      } else {
+        throw error;
+      }
     }
 
-    return Promise.reject(err);
-  }).then(() => {
-    const rootCA = path.resolve(APP_DIR, 'rootCA.pem');
-
-    return stat(rootCA).catch((err) => {
-      if (err.code === 'ENOENT') {
+    const rootCA = resolve(directory, 'rootCA.pem');
+    try {
+      await stat(rootCA)
+    } catch (error) {
+      let args;
+      if (error.code === 'ENOENT') {
         // Generate a new root certificate and key
-        return OpenSSL.generateRootCA(APP_DIR);
+        args = process.argv;
+        let i = args.indexOf('init');
+        if (i === -1) args = ['init', ...args];
+        i = args.indexOf('b');
+        if (i !== -1) args.slice(i, 1);
+        i = args.indexOf('l');
+        if (i !== -1) args.slice(i, 1);
+        await commander.parse(args);
+      } else {
+        throw error;
       }
+    }
+    await commander.parse(process.argv);
 
-      return Promise.reject(err);
-    });
-  });
-}, () => {
-  log(`${chalk.red('✗')}' Could not find OpenSSL, make sure it is installed and accessible.`);
-}).then(() => {
-  commander.parse(process.argv);
-
-  if (!commander.args.length) {
-    commander.help();
+    if (!commander.args.length) {
+      commander.help();
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') log(`${chalk.red('✗')}' Could not find OpenSSL, make sure it is installed and accessible.`)
+    else log(error);
   }
-});
+})();
